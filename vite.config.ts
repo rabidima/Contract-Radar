@@ -9,7 +9,10 @@ export default defineConfig(({ command, isPreview }) => ({
   plugins: [
     tailwindcss(),
     tanstackStart(),
-    ...(command === "build" || isPreview ? [nitro({ preset: "vercel" })] : []),
+    // Auto-registers server/middleware/* (the password gate) — only active
+    // on build/preview, not plain `vite dev`. Local dev is trusted; the
+    // gate matters for the deployed URL.
+    ...(command === "build" || isPreview ? [nitro({ preset: "vercel", serverDir: "./server" })] : []),
     viteReact(),
   ],
 }));
