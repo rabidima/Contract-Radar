@@ -1,4 +1,5 @@
 import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-router";
+import { Toaster } from "sonner";
 import { AppShell } from "@/components/layout/app-shell";
 import { HydrateDesk } from "@/components/playbook/hydrate";
 import appCss from "../styles.css?url";
@@ -43,6 +44,7 @@ function Root() {
         <AppShell>
           <Outlet />
         </AppShell>
+        <Toaster theme="dark" position="bottom-right" richColors />
         <Scripts />
       </body>
     </html>

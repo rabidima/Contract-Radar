@@ -1,20 +1,16 @@
 import { useEffect } from "react";
+import { toast } from "sonner";
 import { usePlaybook } from "@/lib/playbook/store";
 
 export function HydrateDesk() {
   useEffect(() => {
-    const run = () => {
-      const s = usePlaybook.getState();
-      s.hydrateIfEmpty();
-      s.markReady();
-    };
-    run();
-    const unsub = usePlaybook.persist.onFinishHydration(run);
-    const t = window.setTimeout(run, 80);
-    return () => {
-      unsub?.();
-      window.clearTimeout(t);
-    };
+    usePlaybook
+      .getState()
+      .hydrateFromServer()
+      .catch((err: unknown) => {
+        console.error("[contract-radar] initial hydrate failed:", err);
+        toast.error("Couldn't load from the server — check your connection and reload.");
+      });
   }, []);
 
   return null;
