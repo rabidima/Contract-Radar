@@ -53,17 +53,11 @@ function matchesCategory(o: Opportunity, filter: string): boolean {
   return true;
 }
 
-/** Sorts still-actionable notices soonest-deadline-first at the top; a
- * notice whose deadline already passed (SAM.gov's "Active" flag doesn't
- * mean the response window is still open) sinks below all of those, most
- * recently closed first, with no-deadline notices last of all. */
+/** Soonest deadline first; no-deadline notices last. Past-deadline notices
+ * never reach this — they're filtered out before rendering. */
 function openSortKey(o: Opportunity): number {
   const days = daysUntil(o.responseDate);
-  if (days === null) return Infinity;
-  // Same calendar-day rounding as the "Due today" / "Closed" label below,
-  // so a card never sorts into the closed bucket while still reading as
-  // due today (or vice versa).
-  return days >= 0 ? days : 1e6 - days;
+  return days === null ? Infinity : days;
 }
 
 function matchesStat(o: Opportunity, stat: StatFilter | null): boolean {
@@ -155,7 +149,14 @@ function ContractRadar() {
     addKeywordMutation.mutate();
   }
 
-  const opportunities = opportunitiesQuery.data ?? [];
+  // Drop open notices whose deadline already passed — SAM.gov's "Active"
+  // flag doesn't mean the response window is still open, and a stale
+  // "Closed" card isn't useful on a bid list.
+  const opportunities = (opportunitiesQuery.data ?? []).filter((o) => {
+    if (o.status !== "open") return true;
+    const days = daysUntil(o.responseDate);
+    return days === null || days >= 0;
+  });
   const watchlist = watchlistQuery.data ?? [];
   const naicsItems = watchlist.filter((w) => w.type === "naics");
   const keywordItems = watchlist.filter((w) => w.type === "keyword");
@@ -410,10 +411,6 @@ function OpportunityCard({ o, watchlist }: { o: Opportunity; watchlist: Watchlis
     if (days === null) {
       deadlineLabel = "See notice";
       deadlineSub = "no deadline listed";
-    } else if (days < 0) {
-      stripe = "nogo";
-      deadlineLabel = "Closed";
-      deadlineSub = fmtDate(o.responseDate) ?? "";
     } else if (days === 0) {
       stripe = "nogo";
       deadlineLabel = "Due today";
