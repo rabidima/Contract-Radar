@@ -1,7 +1,7 @@
 import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-router";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
-import { AppShell } from "@/components/layout/app-shell";
-import { HydrateDesk } from "@/components/playbook/hydrate";
+import { getQueryClient } from "@/lib/query-client";
 import appCss from "../styles.css?url";
 
 const APP_NAME = "Contract Radar";
@@ -14,8 +14,7 @@ export const Route = createRootRoute({
       { title: APP_NAME },
       {
         name: "description",
-        content:
-          "Strategic playbook for turning daily SAM.gov NAICS alerts into awarded federal contracts.",
+        content: "48HourDigital's daily-synced watch list of matching federal contract opportunities.",
       },
       { name: "theme-color", content: "#0b0f14" },
     ],
@@ -34,16 +33,16 @@ export const Route = createRootRoute({
 });
 
 function Root() {
+  const queryClient = getQueryClient();
   return (
     <html lang="en" className="antialiased" suppressHydrationWarning>
       <head>
         <HeadContent />
       </head>
       <body>
-        <HydrateDesk />
-        <AppShell>
+        <QueryClientProvider client={queryClient}>
           <Outlet />
-        </AppShell>
+        </QueryClientProvider>
         <Toaster theme="dark" position="bottom-right" richColors />
         <Scripts />
       </body>

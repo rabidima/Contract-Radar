@@ -1,211 +1,468 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
-import { ArrowRight, BookOpen, Inbox, Scale } from "lucide-react";
-import { useMemo } from "react";
-import { AddNoticeButton } from "@/components/playbook/add-notice";
-import { PageHeader } from "@/components/layout/app-shell";
-import { OppCard } from "@/components/playbook/opp-card";
-import { CHAPTERS, RULES } from "@/lib/playbook/content";
-import { usePlaybook } from "@/lib/playbook/store";
-import { daysUntil, formatCurrency } from "@/lib/utils";
+import { createFileRoute } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState, type FormEvent } from "react";
+import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/field";
+import {
+  addWatchlistItem,
+  fetchOpportunities,
+  fetchSyncMeta,
+  fetchWatchlist,
+  removeWatchlistItem,
+  runSyncNow,
+} from "@/lib/opportunities/server-store";
+import type { Opportunity, WatchlistItem } from "@/lib/opportunities/types";
+import { cn } from "@/lib/utils";
 
-export const Route = createFileRoute("/")({ component: Command });
+export const Route = createFileRoute("/")({ component: ContractRadar });
 
-function Command() {
-  const opportunities = usePlaybook((s) => s.opportunities);
-  const company = usePlaybook((s) => s.company);
-  const day = new Date().getDate();
-  const rule = RULES[day % RULES.length];
+const STAT_FILTERS = ["open", "due3", "due7", "awarded"] as const;
+type StatFilter = (typeof STAT_FILTERS)[number];
 
-  const stats = useMemo(() => {
-    const inbox = opportunities.filter((o) => o.bucket === "inbox").length;
-    const respond = opportunities.filter((o) => o.bucket === "respond").length;
-    const score = opportunities.filter((o) => o.bucket === "score" || o.stage === "gonogo").length;
-    const capture = opportunities.filter((o) => o.stage === "capture").length;
-    const proposal = opportunities.filter((o) => o.stage === "proposal").length;
-    const submitted = opportunities.filter((o) => o.stage === "submitted").length;
-    const gos = opportunities.filter((o) => o.go?.decision === "go" || o.stage === "capture" || o.stage === "proposal" || o.stage === "submitted");
-    const concurrent = gos.filter((o) => o.stage !== "submitted" && o.stage !== "awarded" && o.stage !== "lost" && o.stage !== "no-bid").length;
-    const hot = opportunities
-      .filter((o) => o.bucket !== "pass" && o.noticeType !== "award" && o.noticeType !== "justification")
-      .filter((o) => daysUntil(o.dueAt) <= 10)
-      .sort((a, b) => daysUntil(a.dueAt) - daysUntil(b.dueAt));
-    const pipelineValue = opportunities
-      .filter((o) => ["capture", "proposal", "submitted"].includes(o.stage) && o.estValue)
-      .reduce((s, o) => s + (o.estValue ?? 0), 0);
-    return { inbox, respond, score, capture, proposal, submitted, concurrent, hot, pipelineValue };
-  }, [opportunities]);
+function fmtDate(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
 
-  const today = new Date().toLocaleDateString("en-US", {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
+function daysUntil(iso: string | null): number | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return Math.ceil((d.getTime() - Date.now()) / 86_400_000);
+}
+
+function naicsLabel(code: string, watchlist: WatchlistItem[]): string {
+  const found = watchlist.find((w) => w.type === "naics" && w.value === code);
+  return found?.label || code;
+}
+
+function categoryLabel(o: Opportunity, watchlist: WatchlistItem[]): string {
+  if (o.naics) return naicsLabel(o.naics, watchlist);
+  if (o.matchedKeyword) return `"${o.matchedKeyword}"`;
+  return "General";
+}
+
+function matchesCategory(o: Opportunity, filter: string): boolean {
+  if (filter === "all") return true;
+  if (filter.startsWith("naics:")) return o.naics === filter.slice(6);
+  if (filter.startsWith("kw:")) return o.matchedKeyword === filter.slice(3);
+  return true;
+}
+
+/** Sorts still-actionable notices soonest-deadline-first at the top; a
+ * notice whose deadline already passed (SAM.gov's "Active" flag doesn't
+ * mean the response window is still open) sinks below all of those, most
+ * recently closed first, with no-deadline notices last of all. */
+function openSortKey(o: Opportunity): number {
+  const days = daysUntil(o.responseDate);
+  if (days === null) return Infinity;
+  // Same calendar-day rounding as the "Due today" / "Closed" label below,
+  // so a card never sorts into the closed bucket while still reading as
+  // due today (or vice versa).
+  return days >= 0 ? days : 1e6 - days;
+}
+
+function matchesStat(o: Opportunity, stat: StatFilter | null): boolean {
+  if (!stat) return true;
+  if (stat === "open") return o.status === "open";
+  if (stat === "awarded") return o.status === "awarded";
+  if (o.status !== "open") return false;
+  const days = daysUntil(o.responseDate);
+  if (days === null) return false;
+  if (stat === "due3") return days >= 0 && days <= 3;
+  if (stat === "due7") return days > 3 && days <= 7;
+  return true;
+}
+
+function ContractRadar() {
+  const queryClient = useQueryClient();
+  const [activeFilter, setActiveFilter] = useState("all");
+  const [activeStat, setActiveStat] = useState<StatFilter | null>(null);
+  const [naicsCode, setNaicsCode] = useState("");
+  const [naicsLabelInput, setNaicsLabelInput] = useState("");
+  const [keywordInput, setKeywordInput] = useState("");
+
+  const opportunitiesQuery = useQuery({
+    queryKey: ["opportunities"],
+    queryFn: () => fetchOpportunities(),
+  });
+  const watchlistQuery = useQuery({
+    queryKey: ["watchlist"],
+    queryFn: () => fetchWatchlist(),
+  });
+  const syncMetaQuery = useQuery({
+    queryKey: ["syncMeta"],
+    queryFn: () => fetchSyncMeta(),
   });
 
+  const invalidateAll = () => {
+    void queryClient.invalidateQueries({ queryKey: ["opportunities"] });
+    void queryClient.invalidateQueries({ queryKey: ["watchlist"] });
+    void queryClient.invalidateQueries({ queryKey: ["syncMeta"] });
+  };
+
+  const addNaicsMutation = useMutation({
+    mutationFn: () =>
+      addWatchlistItem({ data: { type: "naics", value: naicsCode.trim(), label: naicsLabelInput.trim() || undefined } }),
+    onSuccess: () => {
+      setNaicsCode("");
+      setNaicsLabelInput("");
+      invalidateAll();
+    },
+    onError: () => toast.error("Couldn't add that NAICS code."),
+  });
+
+  const addKeywordMutation = useMutation({
+    mutationFn: () => addWatchlistItem({ data: { type: "keyword", value: keywordInput.trim() } }),
+    onSuccess: () => {
+      setKeywordInput("");
+      invalidateAll();
+    },
+    onError: () => toast.error("Couldn't add that keyword."),
+  });
+
+  const removeMutation = useMutation({
+    mutationFn: (id: string) => removeWatchlistItem({ data: { id } }),
+    onSuccess: invalidateAll,
+    onError: () => toast.error("Couldn't remove that."),
+  });
+
+  const syncMutation = useMutation({
+    mutationFn: () => runSyncNow(),
+    onSuccess: (result) => {
+      invalidateAll();
+      toast.success(`Synced — ${result.matched} matched, ${result.open} open, ${result.awarded} awarded.`);
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Sync failed."),
+  });
+
+  function submitNaics(e: FormEvent) {
+    e.preventDefault();
+    if (!/^\d{2,6}$/.test(naicsCode.trim())) {
+      toast.error("NAICS code should be 2-6 digits.");
+      return;
+    }
+    addNaicsMutation.mutate();
+  }
+
+  function submitKeyword(e: FormEvent) {
+    e.preventDefault();
+    if (!keywordInput.trim()) return;
+    addKeywordMutation.mutate();
+  }
+
+  const opportunities = opportunitiesQuery.data ?? [];
+  const watchlist = watchlistQuery.data ?? [];
+  const naicsItems = watchlist.filter((w) => w.type === "naics");
+  const keywordItems = watchlist.filter((w) => w.type === "keyword");
+  const syncMeta = syncMetaQuery.data;
+
+  const naicsFiltered = opportunities.filter((o) => matchesCategory(o, activeFilter));
+  const filtered = naicsFiltered.filter((o) => matchesStat(o, activeStat));
+  const open = filtered
+    .filter((o) => o.status === "open")
+    .sort((a, b) => openSortKey(a) - openSortKey(b));
+  const awarded = filtered
+    .filter((o) => o.status === "awarded")
+    .sort((a, b) => new Date(b.publishDate).getTime() - new Date(a.publishDate).getTime());
+
+  const allOpen = naicsFiltered.filter((o) => o.status === "open");
+  const statOpen = allOpen.length;
+  const statDue3 = allOpen.filter((o) => {
+    const d = daysUntil(o.responseDate);
+    return d !== null && d >= 0 && d <= 3;
+  }).length;
+  const statDue7 = allOpen.filter((o) => {
+    const d = daysUntil(o.responseDate);
+    return d !== null && d > 3 && d <= 7;
+  }).length;
+  const statAwarded = naicsFiltered.filter((o) => o.status === "awarded").length;
+
+  const showOpenSection = activeStat !== "awarded";
+  const showAwardedSection = activeStat !== "open" && activeStat !== "due3" && activeStat !== "due7";
+
+  const lastSynced = syncMeta?.lastSyncedAt ? new Date(syncMeta.lastSyncedAt) : null;
+
   return (
-    <div>
-      <PageHeader
-        kicker={today}
-        title="Command"
-        dek="A daily NAICS search is a sensor. Contract Radar is the decision system that turns those pings into captures, compliant proposals, and debriefs — not a bigger inbox."
-        actions={<AddNoticeButton />}
-      />
+    <div className="mx-auto max-w-4xl px-4 py-8 sm:px-8">
+      <header className="flex flex-wrap items-baseline justify-between gap-3">
+        <h1 className="font-display text-3xl tracking-tight text-fg">Contract Radar</h1>
+        <span className="font-mono text-xs tabular text-subtle">
+          {syncMutation.isPending
+            ? "syncing…"
+            : lastSynced
+              ? `last synced ${lastSynced.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${lastSynced.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`
+              : "never synced"}
+        </span>
+      </header>
+      <p className="mt-1.5 max-w-2xl text-sm text-muted">
+        48HourDigital&apos;s watch list of federal contract opportunities on{" "}
+        <a href="https://sam.gov/search/?index=opp" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+          SAM.gov
+        </a>
+        .
+      </p>
 
-      <div className="px-4 py-6 sm:px-8 sm:py-8">
-        {!company.name ? (
-          <Link
-            to="/company"
-            className="mb-6 flex items-center justify-between gap-4 rounded-xl border border-accent/30 bg-accent/10 px-4 py-4 hover:bg-accent/15"
-          >
-            <div>
-              <p className="font-display text-lg text-fg">Set company posture</p>
-              <p className="mt-1 text-sm text-muted">
-                NAICS, set-asides, bid cost, and concurrent-bid cap drive every recommendation on the desk.
-              </p>
-            </div>
-            <ArrowRight className="size-5 shrink-0 text-accent" />
-          </Link>
-        ) : null}
+      <section className="mt-6 rounded-xl border border-border bg-surface p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="font-display text-lg text-fg">Watching</h2>
+          <Button size="sm" onClick={() => syncMutation.mutate()} disabled={syncMutation.isPending}>
+            {syncMutation.isPending ? "Running…" : "Run search now"}
+          </Button>
+        </div>
 
-        <section className="grid grid-cols-2 gap-3 lg:grid-cols-6">
-          <Stat k="Inbox" v={stats.inbox} hint="Unbucketed" />
-          <Stat k="Respond" v={stats.respond} hint="SS / RFI" />
-          <Stat k="Score" v={stats.score} hint="Go / No-Go due" />
-          <Stat k="Capture" v={stats.capture} hint="Live pursuits" />
-          <Stat k="Factory" v={stats.proposal + stats.submitted} hint="Write / wait" />
-          <Stat k="Concurrent GO" v={`${stats.concurrent}/${company.maxConcurrentBids}`} hint="Cap" warn={stats.concurrent >= company.maxConcurrentBids} />
-        </section>
-
-        <section className="mt-6 grid gap-4 lg:grid-cols-3">
-          <div className="rounded-xl border border-border bg-surface p-5 lg:col-span-2">
-            <p className="font-mono text-xs uppercase tracking-widest text-accent">Standing rule {rule.id}</p>
-            <h2 className="mt-2 font-display text-2xl tracking-tight text-fg">{rule.title}</h2>
-            <p className="mt-2 text-sm leading-relaxed text-muted">{rule.text}</p>
-          </div>
-          <div className="rounded-xl border border-border bg-surface p-5">
-            <p className="font-mono text-xs uppercase tracking-widest text-accent">In capture</p>
-            <p className="mt-2 font-display text-3xl tabular text-fg">{formatCurrency(stats.pipelineValue)}</p>
-            <p className="mt-1 text-sm text-muted">Value on GO work only. Passes do not count.</p>
-            <p className="mt-4 text-xs text-subtle">
-              Bid cost {formatCurrency(company.typicalBidCost)} · min contract {formatCurrency(company.minContract)}
-            </p>
-          </div>
-        </section>
-
-        <section className="mt-10">
-          <div className="mb-4 flex items-end justify-between">
-            <h2 className="font-display text-2xl tracking-tight">Today on the desk</h2>
-            <Link to="/desk" className="inline-flex h-11 items-center text-sm text-accent hover:text-fg">
-              Open Daily Desk
-            </Link>
-          </div>
-          {stats.hot.length === 0 ? (
-            <p className="rounded-xl border border-border bg-surface px-4 py-8 text-sm text-muted">
-              Nothing due in the next 10 days. Run the desk anyway — Sources Sought do not wait for a crisis.
-            </p>
-          ) : (
-            <div className="grid gap-3">
-              {stats.hot.slice(0, 4).map((o) => (
-                <OppCard key={o.id} opp={o} company={company} />
-              ))}
-            </div>
-          )}
-        </section>
-
-        <section className="mt-10">
-          <h2 className="font-display text-2xl tracking-tight">The path</h2>
-          <p className="mt-1 max-w-xl text-sm text-muted">
-            Seven links. Skip one and the rest is theater.
-          </p>
-          <ol className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            {(
-              [
-                { n: "01", t: "Sensor net", d: "Exact, adjacent, and keyword searches — plus forecasts.", slug: "sensor-net" },
-                { n: "02", t: "90-second desk", d: "Bucket every notice before it earns a meeting.", href: "/desk" as const },
-                { n: "03", t: "Go / No-Go", d: "Eight factors. 3.8 to bid. Write the no-bid reason.", slug: "go-no-go" },
-                { n: "04", t: "Capture", d: "Three themes, a customer map, a price-to-win band.", slug: "capture" },
-                { n: "05", t: "Factory", d: "Compliance matrix, pink / red / gold, 24-hour-early submit.", slug: "proposal-factory" },
-                { n: "06", t: "Silence", d: "Portal confirmation. No freelance emails to the KO.", slug: "submit-silence" },
-                { n: "07", t: "Debrief", d: "Written request within three days. Repair the factory.", slug: "award-debrief" },
-                { n: "08", t: "Cadence", d: "Daily desk. Friday pipeline. Monthly search audit.", slug: "cadence" },
-              ] as const
-            ).map((s) =>
-              "slug" in s ? (
-                <Link
-                  key={s.n}
-                  to="/playbook/$slug"
-                  params={{ slug: s.slug }}
-                  className="rounded-xl border border-border bg-surface p-4 transition-colors hover:border-border-strong hover:bg-elevated/50"
-                >
-                  <p className="font-mono text-xs text-accent">{s.n}</p>
-                  <p className="mt-2 font-display text-lg text-fg">{s.t}</p>
-                  <p className="mt-1 text-sm leading-relaxed text-muted">{s.d}</p>
-                </Link>
-              ) : (
-                <Link
-                  key={s.n}
-                  to={s.href}
-                  className="rounded-xl border border-border bg-surface p-4 transition-colors hover:border-border-strong hover:bg-elevated/50"
-                >
-                  <p className="font-mono text-xs text-accent">{s.n}</p>
-                  <p className="mt-2 font-display text-lg text-fg">{s.t}</p>
-                  <p className="mt-1 text-sm leading-relaxed text-muted">{s.d}</p>
-                </Link>
-              ),
+        <div className="mt-4">
+          <p className="text-xs font-medium uppercase tracking-wider text-muted">NAICS codes</p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {naicsItems.length === 0 ? (
+              <span className="text-sm italic text-subtle">No NAICS codes yet</span>
+            ) : (
+              naicsItems.map((n) => (
+                <WatchTag key={n.id} text={n.label ? `${n.label} (${n.value})` : n.value} onRemove={() => removeMutation.mutate(n.id)} />
+              ))
             )}
-          </ol>
-        </section>
+          </div>
+          <form onSubmit={submitNaics} className="mt-2.5 flex flex-wrap gap-2">
+            <Input
+              value={naicsCode}
+              onChange={(e) => setNaicsCode(e.target.value)}
+              placeholder="Code, e.g. 541511"
+              className="w-40"
+              inputMode="numeric"
+              maxLength={6}
+            />
+            <Input
+              value={naicsLabelInput}
+              onChange={(e) => setNaicsLabelInput(e.target.value)}
+              placeholder="Label (optional)"
+              className="w-48"
+            />
+            <Button type="submit" variant="outline" size="sm" disabled={addNaicsMutation.isPending}>
+              Add code
+            </Button>
+          </form>
+        </div>
 
-        <section className="mt-10 grid gap-3 md:grid-cols-3">
-          <Quick to="/desk" icon={Inbox} t="Run the morning desk" d="90-second sort on every new NAICS ping." />
-          <Quick to="/playbook" icon={BookOpen} t="Read the field manual" d={`${CHAPTERS.length} chapters. Checklists that persist.`} />
-          <Quick to="/pipeline" icon={Scale} t="Review the board" d="Kill rotting CONDITIONAL. Enforce the bid cap." />
-        </section>
+        <div className="mt-5">
+          <p className="text-xs font-medium uppercase tracking-wider text-muted">Keywords</p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {keywordItems.length === 0 ? (
+              <span className="text-sm italic text-subtle">No keywords yet</span>
+            ) : (
+              keywordItems.map((k) => (
+                <WatchTag key={k.id} text={k.value} onRemove={() => removeMutation.mutate(k.id)} />
+              ))
+            )}
+          </div>
+          <form onSubmit={submitKeyword} className="mt-2.5 flex flex-wrap gap-2">
+            <Input
+              value={keywordInput}
+              onChange={(e) => setKeywordInput(e.target.value)}
+              placeholder="e.g. website redesign"
+              className="w-64"
+            />
+            <Button type="submit" variant="outline" size="sm" disabled={addKeywordMutation.isPending}>
+              Add keyword
+            </Button>
+          </form>
+        </div>
+      </section>
+
+      <div className="mt-5 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+        <StatTile label="Open to bid" value={statOpen} active={activeStat === "open"} onClick={() => setActiveStat(activeStat === "open" ? null : "open")} />
+        <StatTile label="Due ≤ 3 days" value={statDue3} tone="nogo" active={activeStat === "due3"} onClick={() => setActiveStat(activeStat === "due3" ? null : "due3")} />
+        <StatTile label="Due this week" value={statDue7} tone="hold" active={activeStat === "due7"} onClick={() => setActiveStat(activeStat === "due7" ? null : "due7")} />
+        <StatTile label="Recently awarded" value={statAwarded} active={activeStat === "awarded"} onClick={() => setActiveStat(activeStat === "awarded" ? null : "awarded")} />
       </div>
+
+      <div className="mt-5 flex flex-wrap gap-2">
+        <FilterChip label="All categories" active={activeFilter === "all"} onClick={() => setActiveFilter("all")} />
+        {naicsItems.map((n) => (
+          <FilterChip key={n.id} label={n.label || n.value} active={activeFilter === `naics:${n.value}`} onClick={() => setActiveFilter(`naics:${n.value}`)} />
+        ))}
+        {keywordItems.map((k) => (
+          <FilterChip key={k.id} label={`"${k.value}"`} active={activeFilter === `kw:${k.value}`} onClick={() => setActiveFilter(`kw:${k.value}`)} />
+        ))}
+      </div>
+
+      {opportunitiesQuery.isLoading ? (
+        <p className="mt-8 text-sm text-subtle">Loading…</p>
+      ) : (
+        <>
+          {showOpenSection && (
+            <section className="mt-8">
+              <h2 className="font-display text-lg text-fg">Open — respond by</h2>
+              <p className="mt-1 text-xs text-muted">Live solicitations you can still bid on, soonest deadline first.</p>
+              <div className="mt-3 flex flex-col gap-2.5">
+                {open.length === 0 ? (
+                  <EmptyState text="No open opportunities match this filter." />
+                ) : (
+                  open.map((o) => <OpportunityCard key={o.id} o={o} watchlist={watchlist} />)
+                )}
+              </div>
+            </section>
+          )}
+
+          {showAwardedSection && (
+            <section className="mt-8">
+              <h2 className="font-display text-lg text-fg">Recently awarded</h2>
+              <p className="mt-1 text-xs text-muted">Market intel — who&apos;s winning similar work.</p>
+              <div className="mt-3 flex flex-col gap-2.5">
+                {awarded.length === 0 ? (
+                  <EmptyState text="No recent awards match this filter." />
+                ) : (
+                  awarded.map((o) => <OpportunityCard key={o.id} o={o} watchlist={watchlist} />)
+                )}
+              </div>
+            </section>
+          )}
+        </>
+      )}
+
+      <footer className="mt-10 flex flex-wrap justify-between gap-2 border-t border-border pt-4 text-xs text-subtle">
+        <span>Contract Radar · SAM.gov</span>
+        <span>{filtered.length} of {opportunities.length} tracked notices</span>
+      </footer>
     </div>
   );
 }
 
-function Stat({
-  k,
-  v,
-  hint,
-  warn,
-}: {
-  k: string;
-  v: number | string;
-  hint: string;
-  warn?: boolean;
-}) {
+function WatchTag({ text, onRemove }: { text: string; onRemove: () => void }) {
   return (
-    <div className="rounded-xl border border-border bg-surface px-4 py-4">
-      <p className="text-xs uppercase tracking-wider text-subtle">{k}</p>
-      <p className={`mt-1 font-display text-3xl tabular ${warn ? "text-hold" : "text-fg"}`}>{v}</p>
-      <p className="mt-1 text-xs text-muted">{hint}</p>
-    </div>
+    <span className="inline-flex items-center gap-1 rounded-full bg-elevated py-1 pl-3 pr-1 text-xs text-fg">
+      {text}
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label="Remove"
+        className="rounded-full px-1.5 py-0.5 text-subtle hover:bg-nogo/15 hover:text-nogo"
+      >
+        ×
+      </button>
+    </span>
   );
 }
 
-function Quick({
-  to,
-  icon: Icon,
-  t,
-  d,
+function StatTile({
+  label,
+  value,
+  tone,
+  active,
+  onClick,
 }: {
-  to: "/desk" | "/playbook" | "/pipeline";
-  icon: typeof Inbox;
-  t: string;
-  d: string;
+  label: string;
+  value: number;
+  tone?: "nogo" | "hold";
+  active: boolean;
+  onClick: () => void;
 }) {
   return (
-    <Link
-      to={to}
-      className="flex gap-3 rounded-xl border border-border bg-surface p-4 hover:border-border-strong"
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "rounded-xl border bg-surface p-3.5 text-left transition-colors",
+        active ? "border-accent bg-accent/10" : "border-border hover:border-border-strong",
+      )}
     >
-      <Icon className="mt-0.5 size-5 text-accent" />
-      <div>
-        <p className="font-medium text-fg">{t}</p>
-        <p className="mt-1 text-sm text-muted">{d}</p>
+      <div className={cn("font-mono text-xl tabular", tone === "nogo" ? "text-nogo" : tone === "hold" ? "text-hold" : "text-fg")}>
+        {value}
       </div>
-    </Link>
+      <div className="mt-0.5 text-[11px] uppercase tracking-wider text-subtle">{label}</div>
+    </button>
+  );
+}
+
+function FilterChip({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+        active ? "border-accent bg-accent/15 text-accent" : "border-border text-muted hover:text-fg",
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
+function EmptyState({ text }: { text: string }) {
+  return (
+    <div className="rounded-xl border border-dashed border-border-strong px-4 py-10 text-center text-sm text-subtle">
+      {text}
+    </div>
+  );
+}
+
+function OpportunityCard({ o, watchlist }: { o: Opportunity; watchlist: WatchlistItem[] }) {
+  const days = o.status === "open" ? daysUntil(o.responseDate) : null;
+  let stripe: "nogo" | "hold" | "mute" = "mute";
+  let deadlineLabel = "No deadline listed";
+  let deadlineSub = "";
+
+  if (o.status === "open") {
+    if (days === null) {
+      deadlineLabel = "See notice";
+      deadlineSub = "no deadline listed";
+    } else if (days < 0) {
+      stripe = "nogo";
+      deadlineLabel = "Closed";
+      deadlineSub = fmtDate(o.responseDate) ?? "";
+    } else if (days === 0) {
+      stripe = "nogo";
+      deadlineLabel = "Due today";
+      deadlineSub = fmtDate(o.responseDate) ?? "";
+    } else if (days <= 3) {
+      stripe = "nogo";
+      deadlineLabel = `Due in ${days}d`;
+      deadlineSub = fmtDate(o.responseDate) ?? "";
+    } else if (days <= 7) {
+      stripe = "hold";
+      deadlineLabel = `Due in ${days}d`;
+      deadlineSub = fmtDate(o.responseDate) ?? "";
+    } else {
+      deadlineLabel = fmtDate(o.responseDate) ?? "";
+      deadlineSub = `${days}d left`;
+    }
+  } else {
+    deadlineLabel = fmtDate(o.publishDate) ?? "";
+    deadlineSub = "awarded";
+  }
+
+  const stripeColor = stripe === "nogo" ? "bg-nogo" : stripe === "hold" ? "bg-hold" : "bg-border-strong";
+
+  return (
+    <a
+      href={o.link}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="grid grid-cols-[4px_1fr_auto] overflow-hidden rounded-xl border border-border bg-surface transition-colors hover:border-border-strong"
+    >
+      <div className={stripeColor} />
+      <div className="min-w-0 p-3.5">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge tone="accent">{categoryLabel(o, watchlist)}</Badge>
+          <Badge>{o.noticeType}</Badge>
+          {o.setAside ? <Badge tone="go">{o.setAside}</Badge> : null}
+        </div>
+        <p className="mt-2 font-medium leading-snug text-fg">{o.title}</p>
+        <p className="mt-1 text-xs text-muted">
+          {[o.dept, o.office, o.awardee ? `awarded to ${o.awardee}` : null].filter(Boolean).join(" · ")}
+          {o.solicitationNumber ? <span className="ml-1.5 font-mono text-[11px]">{o.solicitationNumber}</span> : null}
+        </p>
+      </div>
+      <div className="flex flex-col items-end justify-center gap-0.5 p-3.5 font-mono">
+        <span className={cn("text-sm", stripe === "nogo" ? "text-nogo" : stripe === "hold" ? "text-hold" : "text-fg")}>
+          {deadlineLabel}
+        </span>
+        <span className="text-[10px] uppercase tracking-wider text-subtle">{deadlineSub}</span>
+      </div>
+    </a>
   );
 }
