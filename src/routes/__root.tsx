@@ -16,7 +16,7 @@ export const Route = createRootRoute({
         name: "description",
         content: "48HourDigital's daily-synced watch list of matching federal contract opportunities.",
       },
-      { name: "theme-color", content: "#0b0f14" },
+      { name: "theme-color", content: "#ffffff" },
     ],
     links: [
       { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },

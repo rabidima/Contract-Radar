@@ -18,11 +18,8 @@ export async function performSync(): Promise<{ open: number; awarded: number; ma
   const apiKey = process.env.SAM_GOV_API_KEY;
   if (!apiKey) throw new Error("SAM_GOV_API_KEY is not set.");
 
-  const watchRows = await query<{ type: "naics" | "keyword"; value: string }>(
-    "select type, value from watchlist",
-  );
-  const naicsCodes = watchRows.filter((w) => w.type === "naics").map((w) => w.value);
-  const keywords = watchRows.filter((w) => w.type === "keyword").map((w) => w.value);
+  const watchRows = await query<{ value: string }>("select value from watchlist");
+  const naicsCodes = watchRows.map((w) => w.value);
 
   const now = new Date();
   // api.sam.gov rejects a range of "more than 1 year" — 365 days measured
@@ -31,11 +28,10 @@ export async function performSync(): Promise<{ open: number; awarded: number; ma
   const yearAgo = new Date(now.getTime() - 360 * 86_400_000);
 
   let matched: Opportunity[] = [];
-  if (naicsCodes.length > 0 || keywords.length > 0) {
+  if (naicsCodes.length > 0) {
     matched = await fetchSamOpportunities({
       apiKey,
       naicsCodes,
-      keywords,
       postedFrom: mmddyyyy(yearAgo),
       postedTo: mmddyyyy(now),
     });
@@ -44,8 +40,8 @@ export async function performSync(): Promise<{ open: number; awarded: number; ma
       await query(
         `insert into opportunities
            (id, title, naics, notice_type, solicitation_number, dept, office,
-            publish_date, response_date, set_aside, status, link, awardee, matched_keyword, updated_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
+            publish_date, response_date, set_aside, status, link, awardee, updated_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
          on conflict (id) do update set
            title = excluded.title,
            naics = excluded.naics,
@@ -59,11 +55,10 @@ export async function performSync(): Promise<{ open: number; awarded: number; ma
            status = excluded.status,
            link = excluded.link,
            awardee = excluded.awardee,
-           matched_keyword = excluded.matched_keyword,
            updated_at = now()`,
         [
           o.id, o.title, o.naics, o.noticeType, o.solicitationNumber, o.dept, o.office,
-          o.publishDate, o.responseDate, o.setAside, o.status, o.link, o.awardee, o.matchedKeyword,
+          o.publishDate, o.responseDate, o.setAside, o.status, o.link, o.awardee,
         ],
       );
     }

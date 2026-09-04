@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { query, queryOne } from "@/lib/db";
+import { NAICS_BY_CODE } from "./naics-codes";
 import { performSync } from "./sync";
 import { uid } from "../utils";
 import type { Opportunity, SyncMeta, WatchlistItem } from "./types";
@@ -18,7 +19,6 @@ type OpportunityRow = {
   status: Opportunity["status"];
   link: string;
   awardee: string | null;
-  matched_keyword: string | null;
 };
 
 function rowToOpportunity(r: OpportunityRow): Opportunity {
@@ -36,43 +36,50 @@ function rowToOpportunity(r: OpportunityRow): Opportunity {
     status: r.status,
     link: r.link,
     awardee: r.awardee,
-    matchedKeyword: r.matched_keyword,
   };
 }
 
 export const fetchOpportunities = createServerFn({ method: "GET" }).handler(
   async (): Promise<Opportunity[]> => {
     const rows = await query<OpportunityRow>(
-      "select * from opportunities order by publish_date desc",
+      "select id, title, naics, notice_type, solicitation_number, dept, office, publish_date, response_date, set_aside, status, link, awardee from opportunities order by publish_date desc",
     );
     return rows.map(rowToOpportunity);
   },
 );
 
-type WatchlistRow = { id: string; type: "naics" | "keyword"; value: string; label: string | null };
+type WatchlistRow = { id: string; value: string; label: string | null; locked: boolean };
 
 export const fetchWatchlist = createServerFn({ method: "GET" }).handler(
   async (): Promise<WatchlistItem[]> => {
     return query<WatchlistRow>(
-      "select id, type, value, label from watchlist order by created_at asc",
+      "select id, value, label, locked from watchlist order by created_at asc",
     );
   },
 );
 
 export const addWatchlistItem = createServerFn({ method: "POST" })
-  .validator((data: { type: "naics" | "keyword"; value: string; label?: string }) => data)
+  .validator((data: { value: string }) => data)
   .handler(async ({ data }): Promise<WatchlistItem> => {
-    const id = uid(data.type === "naics" ? "naics" : "kw");
+    const value = data.value.trim();
+    if (!/^\d{2,6}$/.test(value)) throw new Error("NAICS code must be 2-6 digits.");
+    const label = NAICS_BY_CODE[value] ?? null;
+    const id = uid("naics");
     await query(
-      "insert into watchlist (id, type, value, label) values ($1,$2,$3,$4)",
-      [id, data.type, data.value, data.label ?? null],
+      "insert into watchlist (id, type, value, label, locked) values ($1,'naics',$2,$3,false) on conflict (id) do nothing",
+      [id, value, label],
     );
-    return { id, type: data.type, value: data.value, label: data.label ?? null };
+    return { id, value, label, locked: false };
   });
 
 export const removeWatchlistItem = createServerFn({ method: "POST" })
   .validator((data: { id: string }) => data)
   .handler(async ({ data }) => {
+    const row = await queryOne<{ locked: boolean }>(
+      "select locked from watchlist where id = $1",
+      [data.id],
+    );
+    if (row?.locked) throw new Error("This NAICS code is a default and can't be removed.");
     await query("delete from watchlist where id = $1", [data.id]);
   });
 

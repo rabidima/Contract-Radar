@@ -1,10 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type FormEvent } from "react";
+import { Command as CommandPrimitive } from "cmdk";
+import { useState } from "react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/field";
+import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog";
 import {
   addWatchlistItem,
   fetchOpportunities,
@@ -13,6 +14,7 @@ import {
   removeWatchlistItem,
   runSyncNow,
 } from "@/lib/opportunities/server-store";
+import { NAICS_CODES } from "@/lib/opportunities/naics-codes";
 import type { Opportunity, WatchlistItem } from "@/lib/opportunities/types";
 import { cn } from "@/lib/utils";
 
@@ -35,22 +37,14 @@ function daysUntil(iso: string | null): number | null {
   return Math.ceil((d.getTime() - Date.now()) / 86_400_000);
 }
 
-function naicsLabel(code: string, watchlist: WatchlistItem[]): string {
-  const found = watchlist.find((w) => w.type === "naics" && w.value === code);
+function naicsTitle(code: string, watchlist: WatchlistItem[]): string {
+  const found = watchlist.find((w) => w.value === code);
   return found?.label || code;
-}
-
-function categoryLabel(o: Opportunity, watchlist: WatchlistItem[]): string {
-  if (o.naics) return naicsLabel(o.naics, watchlist);
-  if (o.matchedKeyword) return `"${o.matchedKeyword}"`;
-  return "General";
 }
 
 function matchesCategory(o: Opportunity, filter: string): boolean {
   if (filter === "all") return true;
-  if (filter.startsWith("naics:")) return o.naics === filter.slice(6);
-  if (filter.startsWith("kw:")) return o.matchedKeyword === filter.slice(3);
-  return true;
+  return o.naics === filter;
 }
 
 /** Soonest deadline first; no-deadline notices last. Past-deadline notices
@@ -76,9 +70,7 @@ function ContractRadar() {
   const queryClient = useQueryClient();
   const [activeFilter, setActiveFilter] = useState("all");
   const [activeStat, setActiveStat] = useState<StatFilter | null>(null);
-  const [naicsCode, setNaicsCode] = useState("");
-  const [naicsLabelInput, setNaicsLabelInput] = useState("");
-  const [keywordInput, setKeywordInput] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   const opportunitiesQuery = useQuery({
     queryKey: ["opportunities"],
@@ -99,30 +91,19 @@ function ContractRadar() {
     void queryClient.invalidateQueries({ queryKey: ["syncMeta"] });
   };
 
-  const addNaicsMutation = useMutation({
-    mutationFn: () =>
-      addWatchlistItem({ data: { type: "naics", value: naicsCode.trim(), label: naicsLabelInput.trim() || undefined } }),
+  const addMutation = useMutation({
+    mutationFn: (value: string) => addWatchlistItem({ data: { value } }),
     onSuccess: () => {
-      setNaicsCode("");
-      setNaicsLabelInput("");
+      setPickerOpen(false);
       invalidateAll();
     },
     onError: () => toast.error("Couldn't add that NAICS code."),
   });
 
-  const addKeywordMutation = useMutation({
-    mutationFn: () => addWatchlistItem({ data: { type: "keyword", value: keywordInput.trim() } }),
-    onSuccess: () => {
-      setKeywordInput("");
-      invalidateAll();
-    },
-    onError: () => toast.error("Couldn't add that keyword."),
-  });
-
   const removeMutation = useMutation({
     mutationFn: (id: string) => removeWatchlistItem({ data: { id } }),
     onSuccess: invalidateAll,
-    onError: () => toast.error("Couldn't remove that."),
+    onError: (err) => toast.error(err instanceof Error ? err.message : "Couldn't remove that."),
   });
 
   const syncMutation = useMutation({
@@ -134,21 +115,6 @@ function ContractRadar() {
     onError: (err) => toast.error(err instanceof Error ? err.message : "Sync failed."),
   });
 
-  function submitNaics(e: FormEvent) {
-    e.preventDefault();
-    if (!/^\d{2,6}$/.test(naicsCode.trim())) {
-      toast.error("NAICS code should be 2-6 digits.");
-      return;
-    }
-    addNaicsMutation.mutate();
-  }
-
-  function submitKeyword(e: FormEvent) {
-    e.preventDefault();
-    if (!keywordInput.trim()) return;
-    addKeywordMutation.mutate();
-  }
-
   // Drop open notices whose deadline already passed — SAM.gov's "Active"
   // flag doesn't mean the response window is still open, and a stale
   // "Closed" card isn't useful on a bid list.
@@ -158,8 +124,7 @@ function ContractRadar() {
     return days === null || days >= 0;
   });
   const watchlist = watchlistQuery.data ?? [];
-  const naicsItems = watchlist.filter((w) => w.type === "naics");
-  const keywordItems = watchlist.filter((w) => w.type === "keyword");
+  const watchedCodes = new Set(watchlist.map((w) => w.value));
   const syncMeta = syncMetaQuery.data;
 
   const naicsFiltered = opportunities.filter((o) => matchesCategory(o, activeFilter));
@@ -210,67 +175,50 @@ function ContractRadar() {
 
       <section className="mt-6 rounded-xl border border-border bg-surface p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="font-display text-lg text-fg">Watching</h2>
+          <div>
+            <h2 className="font-display text-lg text-fg">Watching</h2>
+            <p className="mt-0.5 text-xs text-muted">NAICS codes currently searched, and what each one covers.</p>
+          </div>
           <Button size="sm" onClick={() => syncMutation.mutate()} disabled={syncMutation.isPending}>
             {syncMutation.isPending ? "Running…" : "Run search now"}
           </Button>
         </div>
 
-        <div className="mt-4">
-          <p className="text-xs font-medium uppercase tracking-wider text-muted">NAICS codes</p>
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {naicsItems.length === 0 ? (
-              <span className="text-sm italic text-subtle">No NAICS codes yet</span>
-            ) : (
-              naicsItems.map((n) => (
-                <WatchTag key={n.id} text={n.label ? `${n.label} (${n.value})` : n.value} onRemove={() => removeMutation.mutate(n.id)} />
-              ))
-            )}
-          </div>
-          <form onSubmit={submitNaics} className="mt-2.5 flex flex-wrap gap-2">
-            <Input
-              value={naicsCode}
-              onChange={(e) => setNaicsCode(e.target.value)}
-              placeholder="Code, e.g. 541511"
-              className="w-40"
-              inputMode="numeric"
-              maxLength={6}
-            />
-            <Input
-              value={naicsLabelInput}
-              onChange={(e) => setNaicsLabelInput(e.target.value)}
-              placeholder="Label (optional)"
-              className="w-48"
-            />
-            <Button type="submit" variant="outline" size="sm" disabled={addNaicsMutation.isPending}>
-              Add code
-            </Button>
-          </form>
-        </div>
+        <ul className="mt-4 divide-y divide-border overflow-hidden rounded-lg border border-border">
+          {watchlist.length === 0 ? (
+            <li className="px-3 py-4 text-sm italic text-subtle">No NAICS codes yet</li>
+          ) : (
+            watchlist.map((w) => (
+              <li key={w.id} className="flex items-center gap-3 bg-elevated/40 px-3 py-2.5">
+                <span className="shrink-0 font-mono text-xs tabular text-accent">{w.value}</span>
+                <span className="min-w-0 flex-1 truncate text-sm text-fg">{w.label ?? w.value}</span>
+                {w.locked ? (
+                  <span className="shrink-0 text-[10px] uppercase tracking-wider text-subtle">Default</span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => removeMutation.mutate(w.id)}
+                    aria-label={`Remove ${w.value}`}
+                    className="shrink-0 rounded-full px-1.5 py-0.5 text-subtle hover:bg-nogo/15 hover:text-nogo"
+                  >
+                    ×
+                  </button>
+                )}
+              </li>
+            ))
+          )}
+        </ul>
 
-        <div className="mt-5">
-          <p className="text-xs font-medium uppercase tracking-wider text-muted">Keywords</p>
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {keywordItems.length === 0 ? (
-              <span className="text-sm italic text-subtle">No keywords yet</span>
-            ) : (
-              keywordItems.map((k) => (
-                <WatchTag key={k.id} text={k.value} onRemove={() => removeMutation.mutate(k.id)} />
-              ))
-            )}
-          </div>
-          <form onSubmit={submitKeyword} className="mt-2.5 flex flex-wrap gap-2">
-            <Input
-              value={keywordInput}
-              onChange={(e) => setKeywordInput(e.target.value)}
-              placeholder="e.g. website redesign"
-              className="w-64"
-            />
-            <Button type="submit" variant="outline" size="sm" disabled={addKeywordMutation.isPending}>
-              Add keyword
+        <Dialog open={pickerOpen} onOpenChange={setPickerOpen}>
+          <DialogTrigger asChild>
+            <Button variant="outline" size="sm" className="mt-3">
+              + Add NAICS code
             </Button>
-          </form>
-        </div>
+          </DialogTrigger>
+          <DialogContent title="Add a NAICS code" className="max-h-[80dvh] overflow-hidden p-0">
+            <NaicsPicker watchedCodes={watchedCodes} onSelect={(code) => addMutation.mutate(code)} />
+          </DialogContent>
+        </Dialog>
       </section>
 
       <div className="mt-5 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
@@ -282,11 +230,8 @@ function ContractRadar() {
 
       <div className="mt-5 flex flex-wrap gap-2">
         <FilterChip label="All categories" active={activeFilter === "all"} onClick={() => setActiveFilter("all")} />
-        {naicsItems.map((n) => (
-          <FilterChip key={n.id} label={n.label || n.value} active={activeFilter === `naics:${n.value}`} onClick={() => setActiveFilter(`naics:${n.value}`)} />
-        ))}
-        {keywordItems.map((k) => (
-          <FilterChip key={k.id} label={`"${k.value}"`} active={activeFilter === `kw:${k.value}`} onClick={() => setActiveFilter(`kw:${k.value}`)} />
+        {watchlist.map((w) => (
+          <FilterChip key={w.id} label={w.label || w.value} active={activeFilter === w.value} onClick={() => setActiveFilter(w.value)} />
         ))}
       </div>
 
@@ -332,19 +277,46 @@ function ContractRadar() {
   );
 }
 
-function WatchTag({ text, onRemove }: { text: string; onRemove: () => void }) {
+function NaicsPicker({
+  watchedCodes,
+  onSelect,
+}: {
+  watchedCodes: Set<string>;
+  onSelect: (code: string) => void;
+}) {
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-elevated py-1 pl-3 pr-1 text-xs text-fg">
-      {text}
-      <button
-        type="button"
-        onClick={onRemove}
-        aria-label="Remove"
-        className="rounded-full px-1.5 py-0.5 text-subtle hover:bg-nogo/15 hover:text-nogo"
-      >
-        ×
-      </button>
-    </span>
+    <CommandPrimitive className="flex max-h-[70dvh] flex-col" label="NAICS codes">
+      <CommandPrimitive.Input
+        autoFocus
+        placeholder="Search by code or title…"
+        className="h-12 w-full border-b border-border bg-transparent px-4 text-sm text-fg outline-none placeholder:text-subtle"
+      />
+      <CommandPrimitive.List className="flex-1 overflow-y-auto p-2 desk-scroll">
+        <CommandPrimitive.Empty className="px-3 py-6 text-center text-sm text-subtle">
+          No matching NAICS code.
+        </CommandPrimitive.Empty>
+        {NAICS_CODES.map((n) => {
+          const already = watchedCodes.has(n.code);
+          return (
+            <CommandPrimitive.Item
+              key={n.code}
+              value={`${n.code} ${n.title}`}
+              disabled={already}
+              onSelect={() => !already && onSelect(n.code)}
+              className={cn(
+                "flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 text-sm",
+                "data-[selected=true]:bg-elevated",
+                already && "cursor-default opacity-40",
+              )}
+            >
+              <span className="shrink-0 font-mono text-xs tabular text-accent">{n.code}</span>
+              <span className="min-w-0 flex-1 truncate text-fg">{n.title}</span>
+              {already ? <span className="shrink-0 text-[10px] uppercase text-subtle">Added</span> : null}
+            </CommandPrimitive.Item>
+          );
+        })}
+      </CommandPrimitive.List>
+    </CommandPrimitive>
   );
 }
 
@@ -433,6 +405,7 @@ function OpportunityCard({ o, watchlist }: { o: Opportunity; watchlist: Watchlis
   }
 
   const stripeColor = stripe === "nogo" ? "bg-nogo" : stripe === "hold" ? "bg-hold" : "bg-border-strong";
+  const categoryLabel = o.naics ? naicsTitle(o.naics, watchlist) : "General";
 
   return (
     <a
@@ -444,7 +417,7 @@ function OpportunityCard({ o, watchlist }: { o: Opportunity; watchlist: Watchlis
       <div className={stripeColor} />
       <div className="min-w-0 p-3.5">
         <div className="flex flex-wrap items-center gap-1.5">
-          <Badge tone="accent">{categoryLabel(o, watchlist)}</Badge>
+          <Badge tone="accent">{categoryLabel}</Badge>
           <Badge>{o.noticeType}</Badge>
           {o.setAside ? <Badge tone="go">{o.setAside}</Badge> : null}
         </div>

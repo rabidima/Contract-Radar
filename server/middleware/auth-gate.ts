@@ -31,20 +31,20 @@ function loginPage(error?: string): string {
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Contract Radar</title>
 <style>
-  :root { color-scheme: dark; }
+  :root { color-scheme: light; }
   * { box-sizing: border-box; }
   body { margin: 0; min-height: 100dvh; display: flex; align-items: center; justify-content: center;
-    background: #0b0f14; color: #e7ebf0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    background: #ffffff; color: #111111; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
   form { width: 100%; max-width: 320px; padding: 32px; }
   h1 { font-size: 20px; margin: 0 0 4px; }
-  p { color: #8e97a6; margin: 0 0 24px; font-size: 13px; }
-  input { width: 100%; padding: 11px 12px; border-radius: 8px; border: 1px solid #2a3140;
-    background: #161b24; color: #e7ebf0; font-size: 14px; }
-  input:focus { outline: 2px solid #6fa8d6; outline-offset: 1px; }
+  p { color: #5b6058; margin: 0 0 24px; font-size: 13px; }
+  input { width: 100%; padding: 11px 12px; border-radius: 8px; border: 1px solid rgb(17 17 17 / 20%);
+    background: #f4f4f2; color: #111111; font-size: 14px; }
+  input:focus { outline: 2px solid #3d5a72; outline-offset: 1px; }
   button { margin-top: 12px; width: 100%; padding: 11px; border-radius: 8px; border: none;
-    background: #6fa8d6; color: #0b0f14; font-weight: 600; font-size: 14px; cursor: pointer; }
+    background: #3d5a72; color: #ffffff; font-weight: 600; font-size: 14px; cursor: pointer; }
   button:hover { opacity: 0.9; }
-  .error { color: #e06b58; font-size: 13px; margin-top: 10px; }
+  .error { color: #a8493f; font-size: 13px; margin-top: 10px; }
 </style></head>
 <body>
   <form method="POST" action="/__auth">

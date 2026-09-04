@@ -14,16 +14,14 @@ export interface Opportunity {
   status: OpportunityStatus;
   link: string;
   awardee: string | null;
-  matchedKeyword: string | null;
 }
-
-export type WatchlistType = "naics" | "keyword";
 
 export interface WatchlistItem {
   id: string;
-  type: WatchlistType;
   value: string;
   label: string | null;
+  /** Default NAICS codes can't be removed from the watchlist. */
+  locked: boolean;
 }
 
 export interface SyncMeta {

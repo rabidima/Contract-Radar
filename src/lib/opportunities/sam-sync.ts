@@ -44,11 +44,8 @@ function deptAndOffice(fullParentPathName: string | null): { dept: string | null
   return { dept: parts[0], office: parts.length > 1 ? parts[parts.length - 1] : null };
 }
 
-/** Map one api.sam.gov record into this app's Opportunity shape.
- * `matchedNaics` / `matchedKeyword` record which watchlist entry the query
- * that found this notice used — a notice found by NAICS carries its own
- * naicsCode already, so matchedKeyword is only set when found by keyword. */
-export function mapSamOpportunity(raw: SamRawOpportunity, matchedKeyword?: string): Opportunity {
+/** Map one api.sam.gov record into this app's Opportunity shape. */
+export function mapSamOpportunity(raw: SamRawOpportunity): Opportunity {
   const { dept, office } = deptAndOffice(raw.fullParentPathName);
   return {
     id: raw.noticeId,
@@ -64,36 +61,32 @@ export function mapSamOpportunity(raw: SamRawOpportunity, matchedKeyword?: strin
     status: statusFor(raw.type),
     link: raw.uiLink ?? `https://sam.gov/workspace/contract/opp/${raw.noticeId}/view`,
     awardee: raw.award?.awardee?.name ?? null,
-    matchedKeyword: matchedKeyword ?? null,
   };
 }
 
 export interface FetchSamOptions {
   apiKey: string;
   naicsCodes: string[];
-  keywords?: string[];
   /** MM/dd/yyyy — api.sam.gov requires both, max ~1 year apart. */
   postedFrom: string;
   postedTo: string;
   limit?: number;
 }
 
-/** One call per NAICS code + one per keyword (api.sam.gov's `ncode` and
- * `title` params are single-value), merged and de-duplicated by noticeId —
- * a notice can legitimately match more than one of our filters, in which
- * case the earliest match (NAICS, searched first) wins the record. */
+/** One call per NAICS code (api.sam.gov's `ncode` param is single-value),
+ * merged and de-duplicated by noticeId. */
 export async function fetchSamOpportunities(opts: FetchSamOptions): Promise<Opportunity[]> {
-  const { apiKey, naicsCodes, keywords = [], postedFrom, postedTo, limit = 100 } = opts;
+  const { apiKey, naicsCodes, postedFrom, postedTo, limit = 100 } = opts;
   const seen = new Map<string, Opportunity>();
 
-  async function runQuery(extra: Record<string, string>, matchedKeyword?: string) {
+  for (const ncode of naicsCodes) {
     const params = new URLSearchParams({
       api_key: apiKey,
       postedFrom,
       postedTo,
       status: "Active",
       limit: String(limit),
-      ...extra,
+      ncode,
     });
     const res = await fetch(`https://api.sam.gov/opportunities/v2/search?${params.toString()}`);
     if (!res.ok) {
@@ -102,15 +95,8 @@ export async function fetchSamOpportunities(opts: FetchSamOptions): Promise<Oppo
     }
     const data = (await res.json()) as SamSearchResponse;
     for (const raw of data.opportunitiesData) {
-      if (!seen.has(raw.noticeId)) seen.set(raw.noticeId, mapSamOpportunity(raw, matchedKeyword));
+      if (!seen.has(raw.noticeId)) seen.set(raw.noticeId, mapSamOpportunity(raw));
     }
-  }
-
-  for (const ncode of naicsCodes) {
-    await runQuery({ ncode });
-  }
-  for (const title of keywords) {
-    await runQuery({ title }, title);
   }
 
   return [...seen.values()];
