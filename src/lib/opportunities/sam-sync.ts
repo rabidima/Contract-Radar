@@ -64,6 +64,33 @@ export function mapSamOpportunity(raw: SamRawOpportunity): Opportunity {
   };
 }
 
+/** api.sam.gov's error responses are JSON (`{code, message, description,
+ * nextAccessTime}` for quota errors) — surface those fields directly
+ * instead of dumping the raw body, so a rate-limit toast reads as "try
+ * again after 9pm" rather than a wall of JSON. */
+async function describeSamError(res: Response): Promise<string> {
+  const body = await res.text().catch(() => "");
+  let parsed: { message?: string; description?: string; nextAccessTime?: string } | null = null;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    // not JSON — fall through to the raw-body message below
+  }
+
+  if (res.status === 429) {
+    const resetAt = parsed?.nextAccessTime ?? parsed?.description?.match(/after (.+)$/)?.[1];
+    return resetAt
+      ? `SAM.gov daily search quota reached — try again after ${resetAt}.`
+      : "SAM.gov daily search quota reached — try again later.";
+  }
+
+  if (parsed?.message || parsed?.description) {
+    return `api.sam.gov: ${[parsed.message, parsed.description].filter(Boolean).join(" — ")}`;
+  }
+
+  return `api.sam.gov ${res.status} ${res.statusText}: ${body.slice(0, 300)}`;
+}
+
 export interface FetchSamOptions {
   apiKey: string;
   naicsCodes: string[];
@@ -90,8 +117,7 @@ export async function fetchSamOpportunities(opts: FetchSamOptions): Promise<Oppo
     });
     const res = await fetch(`https://api.sam.gov/opportunities/v2/search?${params.toString()}`);
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`api.sam.gov ${res.status} ${res.statusText}: ${body.slice(0, 500)}`);
+      throw new Error(await describeSamError(res));
     }
     const data = (await res.json()) as SamSearchResponse;
     for (const raw of data.opportunitiesData) {
