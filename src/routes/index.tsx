@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Command as CommandPrimitive } from "cmdk";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -66,11 +66,23 @@ function matchesStat(o: Opportunity, stat: StatFilter | null): boolean {
   return true;
 }
 
+// Mirrors sync.ts's MIN_SYNC_INTERVAL_MS — this is only for disabling the
+// button proactively; the server enforces the real limit either way.
+const SYNC_COOLDOWN_MS = 20 * 60 * 1000;
+
 function ContractRadar() {
   const queryClient = useQueryClient();
   const [activeFilter, setActiveFilter] = useState("all");
   const [activeStat, setActiveStat] = useState<StatFilter | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [, setTick] = useState(0);
+
+  // Force a re-render every 30s so the cooldown countdown below counts
+  // down live instead of freezing until something else re-renders.
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   const opportunitiesQuery = useQuery({
     queryKey: ["opportunities"],
@@ -152,6 +164,9 @@ function ContractRadar() {
   const showAwardedSection = activeStat !== "open" && activeStat !== "due3" && activeStat !== "due7";
 
   const lastSynced = syncMeta?.lastSyncedAt ? new Date(syncMeta.lastSyncedAt) : null;
+  const cooldownMsLeft = lastSynced ? lastSynced.getTime() + SYNC_COOLDOWN_MS - Date.now() : 0;
+  const inCooldown = cooldownMsLeft > 0;
+  const cooldownMinsLeft = Math.ceil(cooldownMsLeft / 60_000);
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-8 sm:px-8">
@@ -179,8 +194,13 @@ function ContractRadar() {
             <h2 className="font-display text-lg text-fg">Watching</h2>
             <p className="mt-0.5 text-xs text-muted">NAICS codes currently searched, and what each one covers.</p>
           </div>
-          <Button size="sm" onClick={() => syncMutation.mutate()} disabled={syncMutation.isPending}>
-            {syncMutation.isPending ? "Running…" : "Run search now"}
+          <Button
+            size="sm"
+            onClick={() => syncMutation.mutate()}
+            disabled={syncMutation.isPending || inCooldown}
+            title={inCooldown ? `Synced recently — available again in ~${cooldownMinsLeft}m` : undefined}
+          >
+            {syncMutation.isPending ? "Running…" : inCooldown ? `Available in ~${cooldownMinsLeft}m` : "Run search now"}
           </Button>
         </div>
 

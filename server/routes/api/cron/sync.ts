@@ -1,5 +1,5 @@
 import { defineEventHandler, getHeader, setResponseStatus } from "h3";
-import { performSync } from "@/lib/opportunities/sync";
+import { performSync, SyncCooldownError } from "@/lib/opportunities/sync";
 
 /** Vercel Cron hits this daily with `Authorization: Bearer <CRON_SECRET>`
  * (Vercel's own convention when CRON_SECRET is set on the project) — the
@@ -17,6 +17,11 @@ export default defineEventHandler(async (event) => {
     const result = await performSync();
     return { ok: true, ...result };
   } catch (err) {
+    if (err instanceof SyncCooldownError) {
+      // A manual run happened recently enough that data is already
+      // fresh — not a failure, just nothing to do.
+      return { ok: true, skipped: true, reason: err.message };
+    }
     console.error("[cron/sync] failed:", err);
     setResponseStatus(event, 500);
     return { ok: false, error: err instanceof Error ? err.message : String(err) };

@@ -8,6 +8,21 @@ function mmddyyyy(d: Date): string {
   return `${mm}/${dd}/${d.getFullYear()}`;
 }
 
+// api.sam.gov's daily quota is small enough that a few impatient re-clicks
+// of "Run search now" in one sitting can burn through the whole day's
+// allowance (this happened twice). One call per watched NAICS code per
+// sync, so cheap to exhaust — refuse to re-run within this window instead
+// of finding out via a 429.
+const MIN_SYNC_INTERVAL_MS = 20 * 60 * 1000;
+
+export class SyncCooldownError extends Error {
+  constructor(public readonly retryAt: Date) {
+    const mins = Math.ceil((retryAt.getTime() - Date.now()) / 60_000);
+    super(`Synced recently — try again in about ${mins} minute${mins === 1 ? "" : "s"} to avoid hitting SAM.gov's rate limit.`);
+    this.name = "SyncCooldownError";
+  }
+}
+
 /**
  * The one place that actually talks to api.sam.gov and writes results to
  * Postgres — called both by the "Run search now" server function (a viewer
@@ -17,6 +32,23 @@ function mmddyyyy(d: Date): string {
 export async function performSync(): Promise<{ open: number; awarded: number; matched: number }> {
   const apiKey = process.env.SAM_GOV_API_KEY;
   if (!apiKey) throw new Error("SAM_GOV_API_KEY is not set.");
+
+  // Cron fires once a day, so this only ever matters for "Run search now"
+  // — but applying it uniformly means a manual run right before the
+  // scheduled cron just makes the cron a no-op too, which is correct: the
+  // data is already fresh, no reason to spend more quota confirming it.
+  // Gated on the last ATTEMPT, not just the last success, so a 429 starts
+  // the same cooldown instead of allowing an immediate identical retry.
+  const [{ last_synced_at: lastSyncedAt, last_attempt_at: lastAttemptAt }] = await query<{
+    last_synced_at: Date | null;
+    last_attempt_at: Date | null;
+  }>("select last_synced_at, last_attempt_at from sync_meta where id = 'main'");
+  const lastRun = [lastSyncedAt, lastAttemptAt].filter((d): d is Date => d !== null).sort((a, b) => b.getTime() - a.getTime())[0];
+  if (lastRun) {
+    const retryAt = new Date(lastRun.getTime() + MIN_SYNC_INTERVAL_MS);
+    if (retryAt.getTime() > Date.now()) throw new SyncCooldownError(retryAt);
+  }
+  await query("update sync_meta set last_attempt_at = now() where id = 'main'");
 
   const watchRows = await query<{ value: string }>("select value from watchlist");
   const naicsCodes = watchRows.map((w) => w.value);
