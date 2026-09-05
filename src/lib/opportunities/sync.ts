@@ -1,5 +1,6 @@
 import { query } from "@/lib/db";
 import { fetchSamOpportunities } from "./sam-sync";
+import { appendNewOpportunitiesToSheet } from "./sheets";
 import type { Opportunity } from "./types";
 
 function mmddyyyy(d: Date): string {
@@ -60,6 +61,7 @@ export async function performSync(): Promise<{ open: number; awarded: number; ma
   const yearAgo = new Date(now.getTime() - 360 * 86_400_000);
 
   let matched: Opportunity[] = [];
+  const newlyDiscovered: Opportunity[] = [];
   if (naicsCodes.length > 0) {
     matched = await fetchSamOpportunities({
       apiKey,
@@ -69,7 +71,11 @@ export async function performSync(): Promise<{ open: number; awarded: number; ma
     });
 
     for (const o of matched) {
-      await query(
+      // `xmax = 0` is the standard Postgres tell for "this command actually
+      // inserted the row" vs. hit the ON CONFLICT UPDATE branch — lets us
+      // tell a genuinely new notice from one we're just refreshing, without
+      // a separate lookup per row.
+      const [{ inserted }] = await query<{ inserted: boolean }>(
         `insert into opportunities
            (id, title, naics, notice_type, solicitation_number, dept, office,
             publish_date, response_date, set_aside, status, link, awardee, updated_at)
@@ -87,12 +93,25 @@ export async function performSync(): Promise<{ open: number; awarded: number; ma
            status = excluded.status,
            link = excluded.link,
            awardee = excluded.awardee,
-           updated_at = now()`,
+           updated_at = now()
+         returning (xmax = 0) as inserted`,
         [
           o.id, o.title, o.naics, o.noticeType, o.solicitationNumber, o.dept, o.office,
           o.publishDate, o.responseDate, o.setAside, o.status, o.link, o.awardee,
         ],
       );
+      if (inserted) newlyDiscovered.push(o);
+    }
+  }
+
+  if (newlyDiscovered.length > 0) {
+    try {
+      await appendNewOpportunitiesToSheet(newlyDiscovered);
+    } catch (err) {
+      // The sync itself succeeded and Postgres is the source of truth;
+      // the Sheet is a convenience export, so log and move on rather
+      // than failing the whole sync over a Sheets hiccup.
+      console.error("[sync] Sheets export failed:", err);
     }
   }
 
